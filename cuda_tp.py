@@ -60,7 +60,7 @@ class CudaTensorProduct(torch.nn.Module):
                      | (self.out_indices_compressed << 31)
                      | (self.in1_indices << 10)
                      | self.in2_indices).to(dtype=torch.uint32)
-    self.out_indices = self.out_indices.to(dtype=torch.uint16)
+    self.out_indices = self.out_indices.to(dtype=torch.uint32)
 
 
   def forward(self, in1, in2):

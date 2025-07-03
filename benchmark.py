@@ -7,12 +7,12 @@ import time
 
 torch.set_default_device('cuda')
 
-BATCH_SIZE = 20000
+BATCH_SIZE = 5000
 NUM_WARMUP_ROUNDS = 10
 NUM_TEST_ROUNDS = 100
 
-irreps_in1 = o3.Irreps('8x0e + 8x1e + 8x2e')
-irreps_in2 = o3.Irreps('8x0e + 8x1e + 8x2e')
+irreps_in1 = o3.Irreps('16x0e + 16x1e + 16x2e')
+irreps_in2 = o3.Irreps('16x0e + 16x1e + 16x2e')
 
 def test_tp(baseline, test, name):
   in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
@@ -46,6 +46,6 @@ einsum_tp = EinsumTensorProduct(irreps_in1, irreps_in2)
 coo_tp = COOTensorProduct(irreps_in1, irreps_in2)
 cuda_tp = CudaTensorProduct(irreps_in1, irreps_in2)
 
-#test_tp(baseline, einsum_tp, 'Einsum')
+test_tp(baseline, einsum_tp, 'Einsum')
 test_tp(baseline, coo_tp, 'Sparse Matmul')
 test_tp(baseline, cuda_tp, 'Cuda')

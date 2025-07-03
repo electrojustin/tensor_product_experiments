@@ -8,7 +8,7 @@
 
 __global__ void tensor_product_forward_kernel(
     float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
-    uint16_t *__restrict__ out_indices, float *__restrict__ cb_lut,
+    uint32_t *__restrict__ out_indices, float *__restrict__ cb_lut,
     uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
     size_t in2_size, size_t out_size, size_t minibatch_size) {
   int curr_len_indices = (len_indices + NUM_BLOCKS - 1) / NUM_BLOCKS;
@@ -40,7 +40,7 @@ __global__ void tensor_product_forward_kernel(
 
 void tensor_product_forward_cuda(
     float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
-    uint16_t *__restrict__ out_indices, float *__restrict__ cb_lut,
+    uint32_t *__restrict__ out_indices, float *__restrict__ cb_lut,
     uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
     size_t in2_size, size_t out_size, int batch_size) {
   while (batch_size > 0) {
