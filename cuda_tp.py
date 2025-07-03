@@ -48,15 +48,20 @@ class CudaTensorProduct(torch.nn.Module):
 
     self.cb_lut = list(set(cb_vals))
     self.cb_lut.sort()
-    self.in1_indices = torch.tensor(in1_indices, dtype=torch.uint16)
-    self.in2_indices = torch.tensor(in2_indices, dtype=torch.uint16)
-    self.out_indices = torch.tensor(out_indices, dtype=torch.uint16)
-    self.out_indices_compressed = torch.zeros(self.out_indices.shape, dtype=torch.int) 
+    self.in1_indices = torch.tensor(in1_indices, dtype=torch.int64)
+    self.in2_indices = torch.tensor(in2_indices, dtype=torch.int64)
+    self.out_indices = torch.tensor(out_indices, dtype=torch.int64)
+    self.out_indices_compressed = torch.zeros(self.out_indices.shape, dtype=torch.int64) 
     for i in range(0, self.in1_indices.shape[0]-1):
       self.out_indices_compressed[i] = int(self.out_indices[i+1]) - int(self.out_indices[i])
     self.cb_indices = list(map(lambda x: self.cb_lut.index(x), cb_vals))
     self.cb_lut = torch.tensor(self.cb_lut)
-    self.cb_indices = ((torch.tensor(self.cb_indices, dtype=torch.int) << 1) | self.out_indices_compressed).to(dtype=torch.uint16)
+    self.input_indices = ((torch.tensor(self.cb_indices, dtype=torch.int64) << 20)
+                     | (self.out_indices_compressed << 31)
+                     | (self.in1_indices << 10)
+                     | self.in2_indices).to(dtype=torch.uint32)
+    self.out_indices = self.out_indices.to(dtype=torch.uint16)
+
 
   def forward(self, in1, in2):
     out = torch.zeros((in1.shape[0], in1.shape[1] * in2.shape[1]))
@@ -64,8 +69,6 @@ class CudaTensorProduct(torch.nn.Module):
       in1,
       in2,
       out,
-      self.in1_indices,
-      self.in2_indices,
       self.out_indices,
       self.cb_lut,
-      self.cb_indices)
+      self.input_indices)

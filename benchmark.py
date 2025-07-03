@@ -7,7 +7,7 @@ import time
 
 torch.set_default_device('cuda')
 
-BATCH_SIZE = 10000
+BATCH_SIZE = 20000
 NUM_WARMUP_ROUNDS = 10
 NUM_TEST_ROUNDS = 100
 
@@ -46,6 +46,6 @@ einsum_tp = EinsumTensorProduct(irreps_in1, irreps_in2)
 coo_tp = COOTensorProduct(irreps_in1, irreps_in2)
 cuda_tp = CudaTensorProduct(irreps_in1, irreps_in2)
 
-test_tp(baseline, einsum_tp, 'Einsum')
+#test_tp(baseline, einsum_tp, 'Einsum')
 test_tp(baseline, coo_tp, 'Sparse Matmul')
 test_tp(baseline, cuda_tp, 'Cuda')
