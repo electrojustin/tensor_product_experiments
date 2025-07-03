@@ -7,7 +7,7 @@ import time
 
 torch.set_default_device('cuda')
 
-BATCH_SIZE = 5000
+BATCH_SIZE = 10000
 NUM_WARMUP_ROUNDS = 10
 NUM_TEST_ROUNDS = 100
 

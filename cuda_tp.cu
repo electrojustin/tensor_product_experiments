@@ -1,11 +1,9 @@
-#include <torch/extension.h>
-
 #include <stdint.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-#define NUM_THREADS 128
-#define NUM_BLOCKS 32
+#define NUM_THREADS 32
+#define NUM_BLOCKS 128
 #define MINIBATCH_MAX_SIZE NUM_THREADS
 
 __global__ void tensor_product_forward_kernel(
@@ -16,7 +14,7 @@ __global__ void tensor_product_forward_kernel(
   uint16_t* __restrict__ in2_indices,
   uint16_t* __restrict__ out_indices,
   float* __restrict__ cb_lut,
-  uint8_t* __restrict__ cb_indices,
+  uint16_t* __restrict__ cb_indices,
   size_t len_indices,
   size_t in1_size,
   size_t in2_size,
@@ -35,16 +33,16 @@ __global__ void tensor_product_forward_kernel(
   out += threadIdx.x * out_size;
   float acc = 0.0;
   int i = start_idx;
-  int curr_out = out_indices[i];
+  int out_index = out_indices[i];
   for (start_idx; i < end_idx; i++) {
-    if (out_indices[i] != curr_out) {
-      out[curr_out] += acc;
+    acc += in1[in1_indices[i]] * in2[in2_indices[i]] * cb_lut[cb_indices[i] >> 1];
+    if (cb_indices[i] & 1) {
+      out[out_index] += acc;
       acc = 0.0;
-      curr_out = out_indices[i];
+      out_index++;
     }
-    acc += in1[in1_indices[i]] * in2[in2_indices[i]] * cb_lut[cb_indices[i]];
   }
-  out[out_indices[i-1]] += acc;
+  out[out_index] += acc;
 }
 
 void tensor_product_forward_cuda(
@@ -55,7 +53,7 @@ void tensor_product_forward_cuda(
   uint16_t* __restrict__ in2_indices,
   uint16_t* __restrict__ out_indices,
   float* __restrict__ cb_lut,
-  uint8_t* __restrict__ cb_indices,
+  uint16_t* __restrict__ cb_indices,
   size_t len_indices,
   size_t in1_size,
   size_t in2_size,
