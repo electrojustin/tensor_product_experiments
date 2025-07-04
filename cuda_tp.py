@@ -4,6 +4,74 @@ import math
 import random
 from torch.utils.cpp_extension import load
 
+def cluster_size(in1_idx1, in2_idx1, out_idx1,
+                 in1_idx2, in2_idx2, out_idx2,
+                 in1_idx3, in2_idx3, out_idx3):
+  ret = 1
+  if (in1_idx2 ^ in1_idx1) < 32 and (in2_idx2 - in2_idx1) < 2 and out_idx2 == out_idx1:
+    ret += 1
+    if (in1_idx3 ^ in1_idx1) < 32 and (in2_idx3 - in2_idx2) < 2 and out_idx3 == out_idx2:
+      ret += 1
+
+  return ret
+
+
+def cluster_indices(in1_indices, in2_indices, cb_indices, out_indices):
+  ret = []
+  i = 0
+  while i + 2 < len(in1_indices):
+    size = cluster_size(in1_indices[i], in2_indices[i], out_indices[i],
+                        in1_indices[i+1], in2_indices[i+1], out_indices[i+1],
+                        in1_indices[i+2], in2_indices[i+2], out_indices[i+2])
+    ret.append([])
+    for j in range(0, size):
+      ret[-1].append((in1_indices[i+j], in2_indices[i+j], cb_indices[i+j], out_indices[i+j]))
+    i += size
+
+  for j in range(i, len(in1_indices)):
+    ret.append([])
+    ret[-1].append((in1_indices[j], in2_indices[j], cb_indices[j], out_indices[j]))
+
+  return ret
+
+
+def compress_cluster(cluster, flush_acc):
+  ret = 0
+  ret |= cluster[0][0]
+  ret |= cluster[0][1] << 10
+  ret |= cluster[0][2] << 20
+  if flush_acc:
+    ret |= 0x80000000
+  if len(cluster) > 1:
+    ret |= (cluster[1][0] ^ cluster[0][0]) << 32
+    ret |= (cluster[1][1] - cluster[0][1]) << 37
+    ret |= cluster[1][2] << 38
+    if len(cluster) > 2:
+      # XOR with the first element in the cluster to avoid a data depenency on
+      # the second element.
+      ret |= (cluster[2][0] ^ cluster[0][0]) << 48
+      ret |= (cluster[2][1] - cluster[1][1]) << 53
+      ret |= cluster[2][2] << 54
+
+  return ret
+
+
+def compress_indices(in1_indices, in2_indices, cb_indices, out_indices):
+  input_indices = []
+  ret_out_indices = []
+  clusters = cluster_indices(in1_indices, in2_indices, cb_indices, out_indices)
+  for i in range(0, len(clusters)):
+    flush_acc = (i < len(clusters) - 1) and (clusters[i][0][3] != clusters[i+1][0][3])
+    input_indices.append(compress_cluster(clusters[i], flush_acc))
+    ret_out_indices.append(clusters[i][0][3])
+
+  for i in range(len(clusters), 256 * int((len(clusters) + 255) / 256)):
+    input_indices.append(0)
+    ret_out_indices.append(ret_out_indices[-1])
+
+  return input_indices, ret_out_indices
+
+
 class CudaTensorProduct(torch.nn.Module):
   def __init__(self, irreps_in1, irreps_in2):
     super().__init__()
@@ -48,19 +116,14 @@ class CudaTensorProduct(torch.nn.Module):
 
     self.cb_lut = list(set(cb_vals))
     self.cb_lut.sort()
-    self.in1_indices = torch.tensor(in1_indices, dtype=torch.int64)
-    self.in2_indices = torch.tensor(in2_indices, dtype=torch.int64)
-    self.out_indices = torch.tensor(out_indices, dtype=torch.int64)
-    self.out_indices_compressed = torch.zeros(self.out_indices.shape, dtype=torch.int64) 
-    for i in range(0, self.in1_indices.shape[0]-1):
-      self.out_indices_compressed[i] = int(self.out_indices[i+1]) - int(self.out_indices[i])
+    self.cb_lut.insert(0, 0)
     self.cb_indices = list(map(lambda x: self.cb_lut.index(x), cb_vals))
-    self.cb_lut = torch.tensor(self.cb_lut)
-    self.input_indices = ((torch.tensor(self.cb_indices, dtype=torch.int64) << 20)
-                     | (self.out_indices_compressed << 31)
-                     | (self.in1_indices << 10)
-                     | self.in2_indices).to(dtype=torch.uint32)
-    self.out_indices = self.out_indices.to(dtype=torch.uint32)
+
+    self.input_indices, self.out_indices = compress_indices(in1_indices, in2_indices, self.cb_indices, out_indices)
+
+    self.input_indices = torch.tensor(self.input_indices, dtype=torch.uint64)
+    self.out_indices = torch.tensor(self.out_indices, dtype=torch.uint32)
+    self.cb_lut = torch.tensor(self.cb_lut)    
 
 
   def forward(self, in1, in2):
