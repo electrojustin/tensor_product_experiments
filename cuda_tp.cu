@@ -9,22 +9,40 @@
 #define CHUNKS 1
 
 __global__ void tensor_product_forward_kernel(
-    float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
-    uint32_t *__restrict__ out_indices, float *__restrict__ cb_lut,
-    uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
-    size_t in2_size, size_t out_size, size_t minibatch_size) {
+    float *__restrict__ in1_global, float *__restrict__ in2_global,
+    float *__restrict__ out, uint32_t *__restrict__ out_indices,
+    float *__restrict__ cb_lut_global, uint32_t *__restrict__ input_indices,
+    size_t len_indices, size_t in1_size, size_t in2_size, size_t cb_lut_size,
+    size_t out_size, size_t minibatch_size) {
+  int batch_idx = blockIdx.x;
+  in1_global += batch_idx * in1_size;
+  in2_global += batch_idx * in2_size;
+  out += batch_idx * out_size;
+
+  extern __shared__ float shared_mem[];
+  float *in1 = shared_mem;
+  float *in2 = shared_mem + in1_size;
+  float *cb_lut = shared_mem + in1_size + in2_size;
+
+  for (int i = threadIdx.x; i < in1_size; i += blockDim.x) {
+    in1[i] = in1_global[i];
+  }
+  for (int i = threadIdx.x; i < in2_size; i += blockDim.x) {
+    in2[i] = in2_global[i];
+  }
+  for (int i = threadIdx.x; i < cb_lut_size; i += blockDim.x) {
+    cb_lut[i] = cb_lut_global[i];
+  }
+  __syncthreads();
+
   int curr_len_indices = (len_indices + (NUM_THREADS - 1)) / NUM_THREADS;
   int start_idx = curr_len_indices * threadIdx.x;
   int end_idx = start_idx + curr_len_indices;
-  int batch_idx = blockIdx.x;
   end_idx = end_idx < len_indices ? end_idx : len_indices;
   if (batch_idx >= minibatch_size || start_idx >= len_indices) {
     return;
   }
 
-  in1 += batch_idx * in1_size;
-  in2 += batch_idx * in2_size;
-  out += batch_idx * out_size;
   float acc = 0.0;
   int i = start_idx;
   int out_index = out_indices[i];
@@ -58,13 +76,16 @@ void tensor_product_forward_cuda(
     float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
     uint32_t *__restrict__ out_indices, float *__restrict__ cb_lut,
     uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
-    size_t in2_size, size_t out_size, int batch_size) {
+    size_t in2_size, size_t cb_lut_size, size_t out_size, int batch_size) {
   while (batch_size > 0) {
     for (int i = 0; i < CHUNKS; i++) {
       int minibatch_size = batch_size < MINIBATCH_MAX_SIZE ? batch_size : MINIBATCH_MAX_SIZE;
-      tensor_product_forward_kernel<<<NUM_BLOCKS, NUM_THREADS>>>(
-          in1, in2, out, out_indices, cb_lut, input_indices, len_indices / CHUNKS,
-	  in1_size, in2_size, out_size, minibatch_size);
+      tensor_product_forward_kernel<<<NUM_BLOCKS, NUM_THREADS,
+                                      (in1_size + in2_size + cb_lut_size) *
+                                          sizeof(float)>>>(
+          in1, in2, out, out_indices, cb_lut, input_indices,
+          len_indices / CHUNKS, in1_size, in2_size, cb_lut_size, out_size,
+          minibatch_size);
       out_indices += len_indices / CHUNKS;
       input_indices += len_indices / CHUNKS;
     }
