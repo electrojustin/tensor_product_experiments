@@ -46,15 +46,28 @@ class CudaTensorProduct(torch.nn.Module):
               cb_vals.append(float(cb_coeffs[m1, m2, m3] * math.sqrt(2 * l3 + 1)))
         row_offset += 2 * l3 + 1
 
+    test = {}
+    for i in range(0, len(in1_indices)):
+      if out_indices[i] not in test:
+        test[out_indices[i]] = 0
+      test[out_indices[i]] += 1
+    print(sum(test.values())/len(test.keys()))
+
     self.cb_lut = list(set(cb_vals))
     self.cb_lut.sort()
+    self.cb_lut.insert(0, 0)
+    self.cb_indices = list(map(lambda x: self.cb_lut.index(x), cb_vals))
+    #for i in range(len(in1_indices), 1024 * int((len(in1_indices) + 1023) / 1024)):
+    #  in1_indices.append(0)
+    #  in2_indices.append(0)
+    #  out_indices.append(0)
+    #  self.cb_indices.append(0)
     self.in1_indices = torch.tensor(in1_indices, dtype=torch.int64)
     self.in2_indices = torch.tensor(in2_indices, dtype=torch.int64)
     self.out_indices = torch.tensor(out_indices, dtype=torch.int64)
     self.out_indices_compressed = torch.zeros(self.out_indices.shape, dtype=torch.int64) 
     for i in range(0, self.in1_indices.shape[0]-1):
       self.out_indices_compressed[i] = int(self.out_indices[i+1]) - int(self.out_indices[i])
-    self.cb_indices = list(map(lambda x: self.cb_lut.index(x), cb_vals))
     self.cb_lut = torch.tensor(self.cb_lut)
     self.input_indices = ((torch.tensor(self.cb_indices, dtype=torch.int64) << 20)
                      | (self.out_indices_compressed << 31)
