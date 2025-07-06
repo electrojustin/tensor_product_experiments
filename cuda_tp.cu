@@ -10,7 +10,7 @@
 __global__ void tensor_product_forward_kernel(
     float *__restrict__ in1_global, float *__restrict__ in2_global, float *__restrict__ out,
     uint32_t *__restrict__ out_indices, float *__restrict__ cb_palette_global,
-    uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
+    uint64_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
     size_t in2_size, size_t cb_palette_size, size_t out_size, size_t minibatch_size) {
   int batch_idx = blockIdx.x;
   in1_global += batch_idx * in1_size;
@@ -40,18 +40,32 @@ __global__ void tensor_product_forward_kernel(
   // Perform the actual tensor product.
 #pragma unroll
   for (int i = threadIdx.x; i < len_indices; i += blockDim.x) {
-    uint32_t input_idx = input_indices[i];
-    atomicAdd(out + out_indices[i],
-	   in1[(input_idx >> 10) & 0x3FF] *
-           in2[input_idx & 0x3FF] *
-           cb_palette[(input_idx >> 20) & 0x3FF]);
+    // Decompress our input and Clebsch-Gordon indices.
+    uint64_t input_idx = input_indices[i];
+    int in1_idx1 = input_idx & 0x3FF;
+    int in2_idx1 = (input_idx >> 10) & 0x3FF;
+    int cb_idx1 = (input_idx >> 20) & 0x3FF;
+    int in1_idx2 = ((input_idx >> 32) & 0x1F) ^ in1_idx1;
+    int in2_idx2 = ((input_idx >> 37) & 0x1) + in2_idx1;
+    int cb_idx2 = (input_idx >> 38) & 0x3FF;
+    int in1_idx3 = ((input_idx >> 48) & 0x1F) ^ in1_idx1;
+    int in2_idx3 = ((input_idx >> 53) & 0x1) + in2_idx2;
+    int cb_idx3 = input_idx >> 54;
+
+    // Perform the actual mul-adds.
+    float acc = in1[in1_idx1] * in2[in2_idx1] * cb_palette[cb_idx1];
+    acc += in1[in1_idx2] * in2[in2_idx2] * cb_palette[cb_idx2];
+    acc += in1[in1_idx3] * in2[in2_idx3] * cb_palette[cb_idx3];
+
+    // Write back out to our output.
+    atomicAdd(out + out_indices[i], acc);
   }
 }
 
 void tensor_product_forward_cuda(
     float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
     uint32_t *__restrict__ out_indices, float *__restrict__ cb_palette,
-    uint32_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
+    uint64_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
     size_t in2_size, size_t cb_palette_size, size_t out_size, int batch_size) {
   while (batch_size > 0) {
       int minibatch_size = batch_size < MINIBATCH_MAX_SIZE ? batch_size : MINIBATCH_MAX_SIZE;
