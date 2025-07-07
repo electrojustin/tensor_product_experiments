@@ -81,6 +81,10 @@ def compress_indices(in1_indices, in2_indices, cb_indices, out_indices):
 
 class CudaTensorProduct(torch.nn.Module):
   def __init__(self, irreps_in1, irreps_in2):
+    assert(irreps_in1.dim <= 1024)
+    assert(irreps_in2.dim <= 1024)
+    assert(irreps_in1.lmax <= 15)
+    assert(irreps_in2.lmax <= 15)
     super().__init__()
     self.cuda_tp = load(name='cuda_tp', sources=['cuda_tp.cpp', 'cuda_tp.cu'])
     cb_matrix_layout = {}
