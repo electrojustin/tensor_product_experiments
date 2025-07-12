@@ -112,14 +112,21 @@ class CudaTensorProduct(torch.nn.Module):
 
     self.block_jobs = torch.tensor(block_jobs, dtype=torch.uint32)
     self.block_job_sizes = torch.tensor(block_job_sizes, dtype=torch.uint32)
+    self.samples_per_block = 8
 
 
   def forward(self, in1, in2):
-    out = torch.zeros((in1.shape[0], in1.shape[1] * in2.shape[1]))
+    batch_size = in1.shape[0]
+    padded_batch_size = self.samples_per_block * int((batch_size + self.samples_per_block - 1) / self.samples_per_block)
+    padded_in1 = torch.zeros((padded_batch_size, in1.shape[1]))
+    padded_in2 = torch.zeros((padded_batch_size, in2.shape[1]))
+    padded_in1[:batch_size, :] = in1
+    padded_in2[:batch_size, :] = in2
+    out = torch.zeros((padded_in1.shape[0], padded_in1.shape[1] * padded_in2.shape[1]))
     return self.cuda_tp.forward(
-      in1,
-      in2,
+      padded_in1,
+      padded_in2,
       out,
       self.cb_palette,
       self.block_jobs,
-      self.block_job_sizes)
+      self.block_job_sizes)[:batch_size, :]
