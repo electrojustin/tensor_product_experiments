@@ -72,7 +72,7 @@ class CudaTensorProduct(torch.nn.Module):
     # Create instruction list for every thread in a block, called a "block job".
     out_indices = list(set(out_indices))
     out_indices.sort()
-    num_threads = 128
+    num_threads = 512
     block_jobs = []
     block_job_sizes = []
     while len(out_indices) > 0:

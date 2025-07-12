@@ -3,8 +3,8 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-#define LOG_NUM_THREADS 7
-#define NUM_THREADS (1 << 7)
+#define LOG_NUM_THREADS 9
+#define NUM_THREADS (1 << LOG_NUM_THREADS)
 #define NUM_BLOCKS 1024
 #define MINIBATCH_MAX_SIZE NUM_BLOCKS
 
