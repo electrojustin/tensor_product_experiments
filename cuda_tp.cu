@@ -8,6 +8,9 @@
 #define NUM_BLOCKS 1024
 #define MINIBATCH_MAX_SIZE NUM_BLOCKS
 
+#define BITFIELD_EXTRACT(SRC, DST, START, LEN) asm("bfe.u32 %0, %1, " #START ", " #LEN ";" : "=r"(DST) : "r"(SRC))
+#define BITFIELD_EXTRACT_SIGNED(SRC, DST, START, LEN) asm("bfe.s32 %0, %1, " #START ", " #LEN ";" : "=r"(DST) : "r"(SRC))
+
 __global__ void tensor_product_forward_kernel(
     float *__restrict__ in1_global, float *__restrict__ in2_global,
     float *__restrict__ out, float *__restrict__ cb_palette_global,
@@ -47,7 +50,8 @@ __global__ void tensor_product_forward_kernel(
     uint32_t block_job_size = block_job_sizes[out_idx >> LOG_NUM_THREADS];
     uint32_t input_idx = block_jobs[threadIdx.x];
     int in1_idx = input_idx & 0x3FF;
-    int in2_idx = (input_idx >> 10) & 0x3FF;
+    int in2_idx;
+    BITFIELD_EXTRACT(input_idx, in2_idx, 10, 10);
     int cb_idx = input_idx >> 20;
     float acc = in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
 
@@ -55,19 +59,23 @@ __global__ void tensor_product_forward_kernel(
     for (int block_job_idx = threadIdx.x + blockDim.x;
          block_job_idx < block_job_size; block_job_idx += blockDim.x) {
       input_idx = block_jobs[block_job_idx];
+      if (!input_idx) {
+	break;
+      }
 
-      // The idiom used to compute in1_delta is for sign extension.
-      int in1_delta = (int)((input_idx & 0x1F) << 27);
-      in1_delta >>= 27;
+      int in1_delta;
+      BITFIELD_EXTRACT_SIGNED(input_idx, in1_delta, 0, 5);
       in1_idx += in1_delta;
-      in2_idx += (input_idx >> 5) & 0x1;
-      cb_idx = (input_idx >> 6) & 0x3FF;
+      int in2_delta;
+      BITFIELD_EXTRACT(input_idx, in2_delta, 5, 1);
+      in2_idx += in2_delta;
+      BITFIELD_EXTRACT(input_idx, cb_idx, 6, 10);
       acc += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
-      in1_delta = (int)(((input_idx >> 16) & 0x1F) << 27);
-      in1_delta >>= 27;
+      BITFIELD_EXTRACT_SIGNED(input_idx, in1_delta, 16, 5);
       in1_idx += in1_delta;
-      in2_idx += (input_idx >> 21) & 0x1;
-      cb_idx = input_idx >> 22;
+      BITFIELD_EXTRACT(input_idx, in2_delta, 21, 1);
+      in2_idx += in2_delta;
+      BITFIELD_EXTRACT(input_idx, cb_idx, 22, 10);
       acc += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
     }
     out[out_idx] = acc;
