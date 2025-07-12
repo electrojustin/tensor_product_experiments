@@ -18,7 +18,8 @@ __global__ void tensor_product_forward_kernel(
     uint32_t *__restrict__ block_jobs, uint32_t *__restrict__ block_job_sizes,
     size_t in1_size, size_t in2_size, size_t cb_palette_size, size_t out_size,
     size_t minibatch_size) {
-  if (blockIdx.x * SAMPLES_PER_BLOCK >= minibatch_size || threadIdx.x >= out_size) {
+  if (blockIdx.x * SAMPLES_PER_BLOCK >= minibatch_size ||
+      threadIdx.x >= out_size) {
     return;
   }
 
@@ -30,8 +31,8 @@ __global__ void tensor_product_forward_kernel(
   // Copy in1, in2, and the Clebsch-Gordon coefficient palette to shared memory.
   extern __shared__ float shared_mem[];
   float* in1 = shared_mem;
-  float* in2 = shared_mem + in1_size * SAMPLES_PER_BLOCK;
-  float* cb_palette = shared_mem + (in1_size + in2_size) * SAMPLES_PER_BLOCK;
+  float *in2 = shared_mem + in1_size * SAMPLES_PER_BLOCK;
+  float *cb_palette = shared_mem + (in1_size + in2_size) * SAMPLES_PER_BLOCK;
   for (int i = threadIdx.x; i < in1_size * SAMPLES_PER_BLOCK; i += blockDim.x) {
     in1[i] = in1_global[i];
   }
@@ -57,13 +58,20 @@ __global__ void tensor_product_forward_kernel(
     float4 acc;
     float4 acc2;
     acc.x = in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
-    acc.y = in1[in1_idx + in1_size] * in2[in2_idx + in2_size] * cb_palette[cb_idx];
-    acc.z = in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] * cb_palette[cb_idx];
-    acc.w = in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] * cb_palette[cb_idx];
-    acc2.x = in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] * cb_palette[cb_idx];
-    acc2.y = in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] * cb_palette[cb_idx];
-    acc2.z = in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] * cb_palette[cb_idx];
-    acc2.w = in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] * cb_palette[cb_idx];
+    acc.y =
+        in1[in1_idx + in1_size] * in2[in2_idx + in2_size] * cb_palette[cb_idx];
+    acc.z = in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] *
+            cb_palette[cb_idx];
+    acc.w = in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] *
+            cb_palette[cb_idx];
+    acc2.x = in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] *
+             cb_palette[cb_idx];
+    acc2.y = in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] *
+             cb_palette[cb_idx];
+    acc2.z = in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] *
+             cb_palette[cb_idx];
+    acc2.w = in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] *
+             cb_palette[cb_idx];
 
     // Decompress the delta compressed instructions.
     for (int block_job_idx = threadIdx.x + blockDim.x;
@@ -78,26 +86,40 @@ __global__ void tensor_product_forward_kernel(
       in2_idx += in2_delta;
       BITFIELD_EXTRACT(input_idx, cb_idx, 6, 10);
       acc.x += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
-      acc.y += in1[in1_idx + in1_size] * in2[in2_idx + in2_size] * cb_palette[cb_idx];
-      acc.z += in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] * cb_palette[cb_idx];
-      acc.w += in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] * cb_palette[cb_idx];
-      acc2.x += in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] * cb_palette[cb_idx];
-      acc2.y += in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] * cb_palette[cb_idx];
-      acc2.z += in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] * cb_palette[cb_idx];
-      acc2.w += in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] * cb_palette[cb_idx];
+      acc.y += in1[in1_idx + in1_size] * in2[in2_idx + in2_size] *
+               cb_palette[cb_idx];
+      acc.z += in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] *
+               cb_palette[cb_idx];
+      acc.w += in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] *
+               cb_palette[cb_idx];
+      acc2.x += in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.y += in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.z += in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.w += in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] *
+                cb_palette[cb_idx];
       BITFIELD_EXTRACT_SIGNED(input_idx, in1_delta, 16, 5);
       in1_idx += in1_delta;
       BITFIELD_EXTRACT(input_idx, in2_delta, 21, 1);
       in2_idx += in2_delta;
       BITFIELD_EXTRACT(input_idx, cb_idx, 22, 10);
       acc.x += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
-      acc.y += in1[in1_idx + in1_size] * in2[in2_idx + in2_size] * cb_palette[cb_idx];
-      acc.z += in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] * cb_palette[cb_idx];
-      acc.w += in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] * cb_palette[cb_idx];
-      acc2.x += in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] * cb_palette[cb_idx];
-      acc2.y += in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] * cb_palette[cb_idx];
-      acc2.z += in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] * cb_palette[cb_idx];
-      acc2.w += in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] * cb_palette[cb_idx];
+      acc.y += in1[in1_idx + in1_size] * in2[in2_idx + in2_size] *
+               cb_palette[cb_idx];
+      acc.z += in1[in1_idx + 2 * in1_size] * in2[in2_idx + 2 * in2_size] *
+               cb_palette[cb_idx];
+      acc.w += in1[in1_idx + 3 * in1_size] * in2[in2_idx + 3 * in2_size] *
+               cb_palette[cb_idx];
+      acc2.x += in1[in1_idx + 4 * in1_size] * in2[in2_idx + 4 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.y += in1[in1_idx + 5 * in1_size] * in2[in2_idx + 5 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.z += in1[in1_idx + 6 * in1_size] * in2[in2_idx + 6 * in2_size] *
+                cb_palette[cb_idx];
+      acc2.w += in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] *
+                cb_palette[cb_idx];
     }
     out[out_idx] = acc.x;
     out[out_idx + out_size] = acc.y;
@@ -118,11 +140,12 @@ void tensor_product_forward_cuda(
     size_t cb_palette_size, size_t out_size, int batch_size) {
   while (batch_size > 0) {
       int minibatch_size = batch_size < MINIBATCH_MAX_SIZE ? batch_size : MINIBATCH_MAX_SIZE;
-      tensor_product_forward_kernel<<<NUM_BLOCKS, NUM_THREADS,
-                                      (SAMPLES_PER_BLOCK * (in1_size + in2_size) + cb_palette_size) *
-                                          sizeof(float)>>>(
-          in1, in2, out, cb_palette, block_jobs, block_job_sizes, in1_size,
-          in2_size, cb_palette_size, out_size, minibatch_size);
+      tensor_product_forward_kernel<<<
+          NUM_BLOCKS, NUM_THREADS,
+          (SAMPLES_PER_BLOCK * (in1_size + in2_size) + cb_palette_size) *
+              sizeof(float)>>>(in1, in2, out, cb_palette, block_jobs,
+                               block_job_sizes, in1_size, in2_size,
+                               cb_palette_size, out_size, minibatch_size);
       batch_size -= MINIBATCH_MAX_SIZE;
       in1 += in1_size * MINIBATCH_MAX_SIZE;
       in2 += in2_size * MINIBATCH_MAX_SIZE;
