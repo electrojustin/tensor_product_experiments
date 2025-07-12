@@ -4,81 +4,6 @@ import math
 import random
 from torch.utils.cpp_extension import load
 
-# In order to avoid branching, we only compress together indices which all
-# contribute to the same output row. This helper function helps us determine
-# how many of the next three indices we can actually cluster together.
-def cluster_size(in1_idx1, in2_idx1, out_idx1,
-                 in1_idx2, in2_idx2, out_idx2,
-                 in1_idx3, in2_idx3, out_idx3):
-  ret = 1
-  if (in1_idx2 ^ in1_idx1) < 32 and (in2_idx2 - in2_idx1) < 2 and out_idx2 == out_idx1:
-    ret += 1
-    if (in1_idx3 ^ in1_idx1) < 32 and (in2_idx3 - in2_idx2) < 2 and out_idx3 == out_idx2:
-      ret += 1
-
-  return ret
-
-
-# Greedy algorithm for clustering input indices together that are highly correlated.
-# This allows us to use delta compression on the input indices and thus reduces how
-# much space they take up. This also allows us to reduce the number of times we write
-# back to the output row, since we can accumulate up to 3 mul-add operations before
-# we need to write back.
-def cluster_indices(in1_indices, in2_indices, cb_indices, out_indices):
-  ret = []
-  i = 0
-  while i + 2 < len(in1_indices):
-    size = cluster_size(in1_indices[i], in2_indices[i], out_indices[i],
-                        in1_indices[i+1], in2_indices[i+1], out_indices[i+1],
-                        in1_indices[i+2], in2_indices[i+2], out_indices[i+2])
-    ret.append([])
-    for j in range(0, size):
-      ret[-1].append((in1_indices[i+j], in2_indices[i+j], cb_indices[i+j], out_indices[i+j]))
-    i += size
-
-  for j in range(i, len(in1_indices)):
-    ret.append([])
-    ret[-1].append((in1_indices[j], in2_indices[j], cb_indices[j], out_indices[j]))
-
-  return ret
-
-
-# Pack our index cluster into 64 bits.
-def compress_cluster(cluster):
-  ret = 0
-  ret |= cluster[0][0]
-  ret |= cluster[0][1] << 10
-  ret |= cluster[0][2] << 20
-  if len(cluster) > 1:
-    ret |= (cluster[1][0] ^ cluster[0][0]) << 32
-    ret |= (cluster[1][1] - cluster[0][1]) << 37
-    ret |= cluster[1][2] << 38
-    if len(cluster) > 2:
-      # XOR with the first element in the cluster to avoid a data depenency on
-      # the second element.
-      ret |= (cluster[2][0] ^ cluster[0][0]) << 48
-      ret |= (cluster[2][1] - cluster[1][1]) << 53
-      ret |= cluster[2][2] << 54
-
-  return ret
-
-
-# Cluster and compress our input and Clebsch-Gordon indices.
-def compress_indices(in1_indices, in2_indices, cb_indices, out_indices):
-  input_indices = []
-  ret_out_indices = []
-  clusters = cluster_indices(in1_indices, in2_indices, cb_indices, out_indices)
-  for i in range(0, len(clusters)):
-    input_indices.append(compress_cluster(clusters[i]))
-    ret_out_indices.append(clusters[i][0][3])
-
-  for i in range(len(clusters), 256 * int((len(clusters) + 255) / 256)):
-    input_indices.append(0)
-    ret_out_indices.append(ret_out_indices[-1])
-
-  return input_indices, ret_out_indices
-
-
 class CudaTensorProduct(torch.nn.Module):
   def __init__(self, irreps_in1, irreps_in2):
     assert(irreps_in1.dim <= 1024)
@@ -132,14 +57,61 @@ class CudaTensorProduct(torch.nn.Module):
     self.cb_indices = list(map(lambda x: self.cb_palette.index(x), cb_vals))
     self.cb_palette = torch.tensor(self.cb_palette)
 
-    # Delta compress the input indices and pack them with the compressed
-    # Clebsch-Gordon coefficients.
-    self.input_indices, self.out_indices = compress_indices(in1_indices, in2_indices, self.cb_indices, out_indices)
-    self.input_indices = torch.tensor(self.input_indices, dtype=torch.uint64)
+    # Batch up index tuples by their corresponding output row.
+    metadata = {}
+    for in1_idx, in2_idx, cb_idx, out_idx in zip(in1_indices, in2_indices, self.cb_indices, out_indices):
+      if out_idx not in metadata:
+        metadata[out_idx] = []
+      elif in2_idx - metadata[out_idx][-1][1] > 1:
+        # Usually delta in2_idx is either 0 or 1, but every once in a while
+        # it's 2, so we add fake entries to the tuple list to bridge the gap.
+        for i in range(metadata[out_idx][-1][1]+1, in2_idx):
+          metadata[out_idx].append((in1_idx, i, 0, out_idx))
+      metadata[out_idx].append((in1_idx, in2_idx, cb_idx, out_idx))
 
-    # TODO: These out_indices are highly correlated with each other. I tried a few delta
-    # compression schemes, but none of them play nice with the grid-stride loop.
-    self.out_indices = torch.tensor(self.out_indices, dtype=torch.uint32)
+    # Create instruction list for every thread in a block, called a "block job".
+    out_indices = list(set(out_indices))
+    out_indices.sort()
+    num_threads = 128
+    block_jobs = []
+    block_job_sizes = []
+    while len(out_indices) > 0:
+      block_job_size_in_clusters = min(len(out_indices), num_threads)
+      # We need to pad the instructions because there might be a varying number
+      # per output row.
+      cluster_size = max(map(lambda x: len(metadata[x]), out_indices[:block_job_size_in_clusters]))
+      block_job = []
+      # We use cluster_size rows and num_threads columns even though this is a 
+      # little unintuitive because it allows us to write the decompression loop
+      # in grid-stride form, which helps with read coallescing.
+      for i in range(0, cluster_size):
+        for j in range(0, num_threads):
+          if j >= block_job_size_in_clusters or i >= len(metadata[out_indices[j]]):
+            # Insert padding for this instruction.
+            if i == 0 or i % 2 == 1:
+              block_job.append(0)
+          else:
+            metadata_entry = metadata[out_indices[j]][i]
+            if i == 0:
+              # The first instruction needs to use absolute addressing.
+              block_job.append(metadata_entry[0] | (metadata_entry[1] << 10) | (metadata_entry[2] << 20))
+            else:
+              # Subsequent instructions can use a delta compression scheme
+              # to pack two instructions into one 32-bit word.
+              last_metadata_entry = metadata[out_indices[j]][i-1]
+              block_job_entry = ((metadata_entry[0] - last_metadata_entry[0]) & 0x1F) \
+                                  | ((metadata_entry[1] - last_metadata_entry[1]) << 5) \
+                                  | (metadata_entry[2] << 6)
+              if i % 2 == 1:
+                block_job.append(block_job_entry)
+              else:
+                block_job[int(i / 2) * num_threads + j] |= block_job_entry << 16
+      block_jobs += block_job
+      block_job_sizes.append(len(block_job))
+      out_indices = out_indices[block_job_size_in_clusters:]
+
+    self.block_jobs = torch.tensor(block_jobs, dtype=torch.uint32)
+    self.block_job_sizes = torch.tensor(block_job_sizes, dtype=torch.uint32)
 
 
   def forward(self, in1, in2):
@@ -148,6 +120,6 @@ class CudaTensorProduct(torch.nn.Module):
       in1,
       in2,
       out,
-      self.out_indices,
       self.cb_palette,
-      self.input_indices)
+      self.block_jobs,
+      self.block_job_sizes)

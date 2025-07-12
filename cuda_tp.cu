@@ -3,15 +3,17 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-#define NUM_THREADS 128
+#define LOG_NUM_THREADS 7
+#define NUM_THREADS (1 << 7)
 #define NUM_BLOCKS 1024
 #define MINIBATCH_MAX_SIZE NUM_BLOCKS
 
 __global__ void tensor_product_forward_kernel(
-    float *__restrict__ in1_global, float *__restrict__ in2_global, float *__restrict__ out,
-    uint32_t *__restrict__ out_indices, float *__restrict__ cb_palette_global,
-    uint64_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
-    size_t in2_size, size_t cb_palette_size, size_t out_size, size_t minibatch_size) {
+    float *__restrict__ in1_global, float *__restrict__ in2_global,
+    float *__restrict__ out, float *__restrict__ cb_palette_global,
+    uint32_t *__restrict__ block_jobs, uint32_t *__restrict__ block_job_sizes,
+    size_t in1_size, size_t in2_size, size_t cb_palette_size, size_t out_size,
+    size_t minibatch_size) {
   int batch_idx = blockIdx.x;
   in1_global += batch_idx * in1_size;
   in2_global += batch_idx * in2_size;
@@ -33,52 +35,61 @@ __global__ void tensor_product_forward_kernel(
   }
   __syncthreads();
 
-  if (batch_idx >= minibatch_size || threadIdx.x >= len_indices) {
+  if (batch_idx >= minibatch_size || threadIdx.x >= out_size) {
     return;
   }
 
-  // Perform the actual tensor product.
-#pragma unroll
-  for (int i = threadIdx.x; i < len_indices; i += blockDim.x) {
-    // Decompress our input and Clebsch-Gordon indices.
-    uint64_t input_idx = input_indices[i];
-    int in1_idx1 = input_idx & 0x3FF;
-    int in2_idx1 = (input_idx >> 10) & 0x3FF;
-    int cb_idx1 = (input_idx >> 20) & 0x3FF;
-    int in1_idx2 = ((input_idx >> 32) & 0x1F) ^ in1_idx1;
-    int in2_idx2 = ((input_idx >> 37) & 0x1) + in2_idx1;
-    int cb_idx2 = (input_idx >> 38) & 0x3FF;
-    int in1_idx3 = ((input_idx >> 48) & 0x1F) ^ in1_idx1;
-    int in2_idx3 = ((input_idx >> 53) & 0x1) + in2_idx2;
-    int cb_idx3 = input_idx >> 54;
+  // One iteration of this loop accumulates all the products needed for one
+  // output row. This ensures we keep the number of writes at the absolute
+  // minimum.
+  for (int out_idx = threadIdx.x; out_idx < out_size; out_idx += blockDim.x) {
+    // Unpack the instruction written in absolute form.
+    uint32_t block_job_size = block_job_sizes[out_idx >> LOG_NUM_THREADS];
+    uint32_t input_idx = block_jobs[threadIdx.x];
+    int in1_idx = input_idx & 0x3FF;
+    int in2_idx = (input_idx >> 10) & 0x3FF;
+    int cb_idx = input_idx >> 20;
+    float acc = in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
 
-    // Perform the actual mul-adds.
-    float acc = in1[in1_idx1] * in2[in2_idx1] * cb_palette[cb_idx1];
-    acc += in1[in1_idx2] * in2[in2_idx2] * cb_palette[cb_idx2];
-    acc += in1[in1_idx3] * in2[in2_idx3] * cb_palette[cb_idx3];
+    // Decompress the delta compressed instructions.
+    for (int block_job_idx = threadIdx.x + blockDim.x;
+         block_job_idx < block_job_size; block_job_idx += blockDim.x) {
+      input_idx = block_jobs[block_job_idx];
 
-    // Write back out to our output.
-    atomicAdd(out + out_indices[i], acc);
+      // The idiom used to compute in1_delta is for sign extension.
+      int in1_delta = (int)((input_idx & 0x1F) << 27);
+      in1_delta >>= 27;
+      in1_idx += in1_delta;
+      in2_idx += (input_idx >> 5) & 0x1;
+      cb_idx = (input_idx >> 6) & 0x3FF;
+      acc += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
+      in1_delta = (int)(((input_idx >> 16) & 0x1F) << 27);
+      in1_delta >>= 27;
+      in1_idx += in1_delta;
+      in2_idx += (input_idx >> 21) & 0x1;
+      cb_idx = input_idx >> 22;
+      acc += in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];
+    }
+    out[out_idx] = acc;
+    block_jobs += block_job_size;
   }
 }
 
 void tensor_product_forward_cuda(
     float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
-    uint32_t *__restrict__ out_indices, float *__restrict__ cb_palette,
-    uint64_t *__restrict__ input_indices, size_t len_indices, size_t in1_size,
-    size_t in2_size, size_t cb_palette_size, size_t out_size, int batch_size) {
+    float *__restrict__ cb_palette, uint32_t *__restrict__ block_jobs,
+    uint32_t *__restrict__ block_job_sizes, size_t in1_size, size_t in2_size,
+    size_t cb_palette_size, size_t out_size, int batch_size) {
   while (batch_size > 0) {
       int minibatch_size = batch_size < MINIBATCH_MAX_SIZE ? batch_size : MINIBATCH_MAX_SIZE;
-      tensor_product_forward_kernel<<<NUM_BLOCKS, NUM_THREADS, (in1_size + in2_size + cb_palette_size) * sizeof(float)>>>(
-          in1, in2, out, out_indices, cb_palette, input_indices, len_indices,
-	  in1_size, in2_size, cb_palette_size, out_size, minibatch_size);
-      out_indices += len_indices;
-      input_indices += len_indices;
-    out_indices -= len_indices;
-    input_indices -= len_indices;
-    batch_size -= MINIBATCH_MAX_SIZE;
-    in1 += in1_size * MINIBATCH_MAX_SIZE;
-    in2 += in2_size * MINIBATCH_MAX_SIZE;
-    out += out_size * MINIBATCH_MAX_SIZE;
+      tensor_product_forward_kernel<<<NUM_BLOCKS, NUM_THREADS,
+                                      (in1_size + in2_size + cb_palette_size) *
+                                          sizeof(float)>>>(
+          in1, in2, out, cb_palette, block_jobs, block_job_sizes, in1_size,
+          in2_size, cb_palette_size, out_size, minibatch_size);
+      batch_size -= MINIBATCH_MAX_SIZE;
+      in1 += in1_size * MINIBATCH_MAX_SIZE;
+      in2 += in2_size * MINIBATCH_MAX_SIZE;
+      out += out_size * MINIBATCH_MAX_SIZE;
   }
 }
