@@ -59,9 +59,6 @@ __global__ void tensor_product_forward_kernel(
     for (int block_job_idx = threadIdx.x + blockDim.x;
          block_job_idx < block_job_size; block_job_idx += blockDim.x) {
       input_idx = block_jobs[block_job_idx];
-      if (!input_idx) {
-	break;
-      }
 
       int in1_delta;
       BITFIELD_EXTRACT_SIGNED(input_idx, in1_delta, 0, 5);
