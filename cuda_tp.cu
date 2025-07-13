@@ -51,10 +51,10 @@ __global__ void tensor_product_forward_kernel(
     // Unpack the instruction written in absolute form.
     uint32_t block_job_size = block_job_sizes[out_idx >> LOG_NUM_THREADS];
     uint32_t input_idx = block_jobs[threadIdx.x];
-    int in1_idx = input_idx & 0x3FF;
+    int in1_idx = input_idx & 0xFFF;
     int in2_idx;
-    BITFIELD_EXTRACT(input_idx, in2_idx, 10, 10);
-    int cb_idx = input_idx >> 20;
+    BITFIELD_EXTRACT(input_idx, in2_idx, 12, 12);
+    int cb_idx = input_idx >> 24;
     float4 acc;
     float4 acc2;
     acc.x = in1[in1_idx] * in2[in2_idx] * cb_palette[cb_idx];

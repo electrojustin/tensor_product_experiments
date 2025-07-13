@@ -6,8 +6,8 @@ from torch.utils.cpp_extension import load
 
 class CudaTensorProduct(torch.nn.Module):
   def __init__(self, irreps_in1, irreps_in2):
-    assert(irreps_in1.dim <= 1024)
-    assert(irreps_in2.dim <= 1024)
+    assert(irreps_in1.dim <= 4096)
+    assert(irreps_in2.dim <= 4096)
     assert(irreps_in1.lmax <= 15)
     assert(irreps_in2.lmax <= 15)
     super().__init__()
@@ -52,6 +52,7 @@ class CudaTensorProduct(torch.nn.Module):
 
     # Palette compression for the Clebsch-Gordon coefficients.
     self.cb_palette = list(set(cb_vals))
+    assert(len(self.cb_palette) <= 256)
     self.cb_palette.sort()
     self.cb_palette.insert(0, 0)
     self.cb_indices = list(map(lambda x: self.cb_palette.index(x), cb_vals))
@@ -94,7 +95,7 @@ class CudaTensorProduct(torch.nn.Module):
             metadata_entry = metadata[out_indices[j]][i]
             if i == 0:
               # The first instruction needs to use absolute addressing.
-              block_job.append(metadata_entry[0] | (metadata_entry[1] << 10) | (metadata_entry[2] << 20))
+              block_job.append(metadata_entry[0] | (metadata_entry[1] << 12) | (metadata_entry[2] << 24))
             else:
               # Subsequent instructions can use a delta compression scheme
               # to pack two instructions into one 32-bit word.
