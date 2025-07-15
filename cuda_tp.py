@@ -44,6 +44,8 @@ class CudaTensorProduct(torch.nn.Module):
         self.num_weights += self.out_layout[l][0] * self.out_layout[l][1]
         # 1 fused-multiply-add per weight in the dense matmul.
         self.flops += (2 * l + 1) * self.out_layout[l][0] * self.out_layout[l][1]
+    else:
+      self.num_weights = None
 
     l3s = list(cb_matrix_layout.keys())
     l3s.sort()
@@ -162,6 +164,7 @@ class CudaTensorProduct(torch.nn.Module):
 
 
   def forward(self, in1, in2, weights=None):
+    assert((weights is None and self.num_weights is None) or (weights is not None and self.num_weights is not None))
     batch_size = in1.shape[0]
     padded_batch_size = self.samples_per_block * int((batch_size + self.samples_per_block - 1) / self.samples_per_block)
     padded_in1 = torch.zeros((padded_batch_size, in1.shape[1]))
