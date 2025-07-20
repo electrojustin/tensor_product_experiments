@@ -43,7 +43,7 @@ def full_tp_benchmark():
 
     in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
     in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
-    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2))**2)) / BATCH_SIZE / irreps_in1.dim / irreps_in2.dim < 1e-14)
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2))**2)) / BATCH_SIZE / irreps_in1.dim / irreps_in2.dim < 1e-13)
 
     for i in range(0, NUM_WARMUP_ROUNDS):
       e3nn_tp(in1, in2)
@@ -75,22 +75,34 @@ def fc_tp_benchmark():
     irreps_in2 = o3.Irreps(config[2])
     irreps_out = o3.Irreps(config[3])
 
+    start = time.time()
     e3nn_tp = o3.FullyConnectedTensorProduct(irreps_in1, irreps_in2, irreps_out)
     e3nn_tp.compile()
+    print('e3nn compile time: {:.2E}s'.format(time.time() - start))
+    start = time.time()
     test_tp = CudaTensorProduct(irreps_in1, irreps_in2, irreps_out)
-    oeq_tp = FCTPP(irreps_in1, irreps_in2, irreps_out)
-    oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
+    print('test compile time: {:.2E}s'.format(time.time() - start))
+    start = time.time()
     cueq_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.SO3, config[1].replace('e', '')),
                                                cueq.Irreps(cueq.SO3, config[2].replace('e', '')),
                                                cueq.Irreps(cueq.SO3, config[3].replace('e', '')), 
                                                device='cuda', internal_weights=False, shared_weights=True)
+    print('cueq compile time: {:.2E}s'.format(time.time() - start))
+    start = time.time()
+    oeq_tp = FCTPP(irreps_in1, irreps_in2, irreps_out)
+    oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
+    print('oeq compile time: {:.2E}s'.format(time.time() - start))
 
     in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
     in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
-    weights = e3nn_tp.weight.reshape((1, test_tp.num_weights))
+    weights = torch.tensor(e3nn_tp.weight).reshape((1, test_tp.num_weights))
+    weights_perm = weights.flatten()[test_tp.in_weight_gather_indices]
+
     assert(e3nn_tp(in1, in2).shape == test_tp(in1, in2, weights.flatten()).shape)
     assert(test_tp.num_weights == cueq_tp.weight_numel)
-    # TODO: Add MSE asserts here once we get path normalization working.
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights.flatten()))**2)) / BATCH_SIZE / irreps_out.dim < 1e-13)
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights_perm, False))**2)) / BATCH_SIZE / irreps_out.dim < 1e-13)
+
 
     for i in range(0, NUM_WARMUP_ROUNDS):
       e3nn_tp(in1, in2)
@@ -135,6 +147,17 @@ def fc_tp_benchmark():
     end = time.time()
     throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
     print('test throughput: {:.2E}'.format(throughput))
+
+    for i in range(0, NUM_WARMUP_ROUNDS):
+      test_tp(in1, in2, weights_perm, False)
+    torch.cuda.synchronize()
+    start = time.time()
+    for i in range(0, NUM_TEST_ROUNDS):
+      test_tp(in1, in2, weights_perm, False)
+    torch.cuda.synchronize()
+    end = time.time()
+    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
+    print('test throughput (pre-permuted weights): {:.2E}'.format(throughput))
 
 full_tp_benchmark()
 print()

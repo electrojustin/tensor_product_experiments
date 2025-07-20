@@ -23,7 +23,7 @@ class CudaTensorProduct(torch.nn.Module):
             continue
           if l3 not in cb_matrix_layout:
             cb_matrix_layout[l3] = []
-          cb_matrix_layout[l3].append((l1, l2, idx_in1, idx_in2))
+          cb_matrix_layout[l3].append((l1, l2, idx_in1, idx_in2, l3))
           self.cb_height += 2 * l3 + 1
         idx_in2 += 2 * l2 + 1
       idx_in1 += 2 * l1 + 1
@@ -34,7 +34,6 @@ class CudaTensorProduct(torch.nn.Module):
       self.num_weights = 0
       self.out_layout = {}
       gather_offset = 0
-      self.gather_indices = []
       for l in irreps_out.ls:
         if l not in self.out_layout:
           self.out_layout[l] = [0]
@@ -44,6 +43,30 @@ class CudaTensorProduct(torch.nn.Module):
         self.num_weights += self.out_layout[l][0] * self.out_layout[l][1]
         # 1 fused-multiply-add per weight in the dense matmul.
         self.flops += (2 * l + 1) * self.out_layout[l][0] * self.out_layout[l][1]
+
+      # e3nn has an unusual weight layout, so we need to unpermute the weights if we want to
+      # maintain compatibility.
+      self.in_weight_gather_indices = [0] * self.num_weights
+      gather_offsets = {}
+      offset = 0
+      multiplicities = []
+      for l in set(irreps_out.ls):
+        gather_offsets[l] = offset
+        offset += self.out_layout[l][0] * self.out_layout[l][1]
+        multiplicities += cb_matrix_layout[l]
+      multiplicities.sort(key=lambda x: x[0] * \
+              (irreps_in2.lmax + 1) * \
+              (irreps_out.lmax + 1) + x[1] * \
+              (irreps_out.lmax + 1) + x[4])
+      idx = 0
+      for multiplicity in multiplicities:
+        l = multiplicity[4]
+        out_mul = self.out_layout[l][0]
+        in_mul = self.out_layout[l][1]
+        for i in range(0, out_mul):
+          self.in_weight_gather_indices[gather_offsets[l] + i * in_mul] = idx
+          idx += 1
+        gather_offsets[l] += 1
     else:
       self.num_weights = None
 
@@ -57,9 +80,9 @@ class CudaTensorProduct(torch.nn.Module):
     if irreps_out is None:
       for l3 in l3s:
         multiplicities = cb_matrix_layout[l3]
-        multiplicities.sort(key=lambda x: x[0] * irreps_in2.lmax + x[1])
+        multiplicities.sort(key=lambda x: x[0] * (irreps_in2.lmax + 1) + x[1])
         for multiplicity in multiplicities:
-          l1, l2, in1_offset, in2_offset = multiplicity
+          l1, l2, in1_offset, in2_offset, _ = multiplicity
           cb_coeffs = o3.wigner_3j(l1, l2, l3)
           for m3 in range(0, 2 * l3 + 1):
             for m2 in range(0, 2 * l2 + 1):
@@ -79,11 +102,11 @@ class CudaTensorProduct(torch.nn.Module):
       row_offset = 0
       for l3 in l3s:
         multiplicities = cb_matrix_layout[l3]
-        multiplicities.sort(key=lambda x: x[0] * irreps_in2.lmax + x[1])
+        multiplicities.sort(key=lambda x: x[0] * (irreps_in2.lmax + 1) + x[1])
         for m3 in range(0, 2 * l3 + 1):
           multiplicity_idx = 0
           for multiplicity in multiplicities:
-            l1, l2, in1_offset, in2_offset = multiplicity
+            l1, l2, in1_offset, in2_offset, _ = multiplicity
             cb_coeffs = o3.wigner_3j(l1, l2, l3)
             for m2 in range(0, 2 * l2 + 1):
               for m1 in range(0, 2 * l1 + 1):
@@ -163,7 +186,7 @@ class CudaTensorProduct(torch.nn.Module):
     self.samples_per_block = 8
 
 
-  def forward(self, in1, in2, weights=None):
+  def forward(self, in1, in2, weights=None, permute_weights=True):
     assert((weights is None and self.num_weights is None) or (weights is not None and self.num_weights is not None))
     batch_size = in1.shape[0]
     padded_batch_size = self.samples_per_block * int((batch_size + self.samples_per_block - 1) / self.samples_per_block)
@@ -183,6 +206,8 @@ class CudaTensorProduct(torch.nn.Module):
       return intermediate
     else:
       intermediate = torch.t(intermediate)
+      if permute_weights:
+        weights = weights[self.in_weight_gather_indices]
       out = torch.zeros((batch_size, self.out_dims))
       ls = list(self.out_layout.keys())
       ls.sort()
@@ -196,12 +221,14 @@ class CudaTensorProduct(torch.nn.Module):
         out_muls = self.out_layout[l][0]
         weights_len = intermediate_muls * out_muls
         curr_weights = weights[weights_idx:weights_idx + weights_len].reshape((out_muls, intermediate_muls))
+        curr_weights *= math.sqrt(1 / intermediate_muls)
         for m in range(0, 2 * l + 1):
           out[:, out_idx:out_idx+out_muls] = \
                   torch.t(torch.matmul(curr_weights, intermediate[intermediate_idx:intermediate_idx+intermediate_muls, :]))
           intermediate_idx += intermediate_muls
           out_idx += out_muls
         # Create gather indices so we can re-interleave the m planes.
+        # TODO: Generate these in preprocessing.
         for i in range(0, out_muls):
           for m in range(0, 2 * l + 1):
             gather_indices.append(gather_offset + m * out_muls + i)

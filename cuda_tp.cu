@@ -18,8 +18,7 @@ __global__ void tensor_product_forward_kernel(
     uint32_t *__restrict__ block_jobs, uint32_t *__restrict__ block_job_sizes,
     size_t in1_size, size_t in2_size, size_t cb_palette_size, size_t out_size,
     size_t minibatch_size) {
-  if (blockIdx.x * SAMPLES_PER_BLOCK >= minibatch_size ||
-      threadIdx.x >= out_size) {
+  if (blockIdx.x * SAMPLES_PER_BLOCK >= minibatch_size) {
     return;
   }
 
