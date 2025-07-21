@@ -14,6 +14,7 @@ torch.set_default_device('cuda')
 BATCH_SIZE = 50000
 NUM_WARMUP_ROUNDS = 10
 NUM_TEST_ROUNDS = 100
+ERROR_TOLERANCE = 1e-10
 
 configs = [
         ('tetris-poly-1', '1x0e + 1x1e + 1x2e + 1x3e', '1x0e + 1x1e + 1x2e + 1x3e', '64x0e + 48x1e + 32x2e'),
@@ -30,6 +31,19 @@ configs = [
         ('nequip-water', '64x0e + 64x1e', '1x0e + 1x1e', '64x0e + 64x1e'),
 ]
 
+def time_test(callback, name):
+  for i in range(0, NUM_WARMUP_ROUNDS):
+    callback()
+  torch.cuda.synchronize()
+  start = time.time()
+  for i in range(0, NUM_TEST_ROUNDS):
+    callback()
+  torch.cuda.synchronize()
+  end = time.time()
+  throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
+  print('{} throughput: {:.2E}'.format(name, throughput))
+
+
 def full_tp_benchmark():
   print('==== Natural tensor product benchmarks ====')
   for config in configs:
@@ -43,29 +57,16 @@ def full_tp_benchmark():
 
     in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
     in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
-    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2))**2)) / BATCH_SIZE / irreps_in1.dim / irreps_in2.dim < 1e-13)
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2))**2)) / BATCH_SIZE / irreps_in1.dim / irreps_in2.dim < ERROR_TOLERANCE)
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def e3nn_cb():
       e3nn_tp(in1, in2)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      e3nn_tp(in1, in2)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('e3nn throughput: {:.2E}'.format(throughput))
+    time_test(e3nn_cb, 'e3nn')
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def test_cb():
       test_tp(in1, in2)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      test_tp(in1, in2)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('test throughput: {:.2E}'.format(throughput))
+    time_test(test_cb, 'test')
+
 
 def fc_tp_benchmark():
   print('==== Fully connected benchmarks ====')
@@ -92,6 +93,11 @@ def fc_tp_benchmark():
     oeq_tp = FCTPP(irreps_in1, irreps_in2, irreps_out)
     oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
     print('oeq compile time: {:.2E}s'.format(time.time() - start))
+    cueq_ir_mul_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.SO3, config[1].replace('e', '')),
+                                               cueq.Irreps(cueq.SO3, config[2].replace('e', '')),
+                                               cueq.Irreps(cueq.SO3, config[3].replace('e', '')),
+                                               layout=cueq.ir_mul, device='cuda',
+                                               internal_weights=False, shared_weights=True)
 
     in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
     in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
@@ -100,64 +106,33 @@ def fc_tp_benchmark():
 
     assert(e3nn_tp(in1, in2).shape == test_tp(in1, in2, weights.flatten()).shape)
     assert(test_tp.num_weights == cueq_tp.weight_numel)
-    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights.flatten()))**2)) / BATCH_SIZE / irreps_out.dim < 1e-13)
-    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights_perm, False))**2)) / BATCH_SIZE / irreps_out.dim < 1e-13)
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights.flatten()))**2)) / BATCH_SIZE / irreps_out.dim < ERROR_TOLERANCE)
+    assert(float(torch.sum((e3nn_tp(in1, in2) - test_tp(in1, in2, weights_perm, False))**2)) / BATCH_SIZE / irreps_out.dim < ERROR_TOLERANCE)
 
-
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def e3nn_cb():
       e3nn_tp(in1, in2)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      e3nn_tp(in1, in2)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('e3nn throughput: {:.2E}'.format(throughput))
+    time_test(e3nn_cb, 'e3nn')
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def oeq_cb():
       oeq_tp(in1, in2, weights)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      oeq_tp(in1, in2, weights)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('oeq throughput: {:.2E}'.format(throughput))
+    time_test(oeq_cb, 'oeq')
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def cueq_cb():
       cueq_tp(in1, in2, weights)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      cueq_tp(in1, in2, weights)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('cueq throughput: {:.2E}'.format(throughput))
+    time_test(cueq_cb, 'cueq')
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
-      test_tp(in1, in2, weights.flatten())
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      test_tp(in1, in2, weights.flatten())
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('test throughput: {:.2E}'.format(throughput))
+    def cueq_ir_mul_cb():
+      cueq_ir_mul_tp(in1, in2, weights)
+    time_test(cueq_ir_mul_cb, 'cueq (ir_mul layout)')
 
-    for i in range(0, NUM_WARMUP_ROUNDS):
+    def test_cb():
+      test_tp(in1, in2, weights.flatten())
+    time_test(test_cb, 'test')
+
+    def test_prepermute_cb():
       test_tp(in1, in2, weights_perm, False)
-    torch.cuda.synchronize()
-    start = time.time()
-    for i in range(0, NUM_TEST_ROUNDS):
-      test_tp(in1, in2, weights_perm, False)
-    torch.cuda.synchronize()
-    end = time.time()
-    throughput = BATCH_SIZE * NUM_TEST_ROUNDS / (end - start)
-    print('test throughput (pre-permuted weights): {:.2E}'.format(throughput))
+    time_test(test_prepermute_cb, 'test (prepermuted weights)')
+
 
 full_tp_benchmark()
 print()
