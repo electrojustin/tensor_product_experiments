@@ -4,6 +4,20 @@ import math
 import random
 from torch.utils.cpp_extension import load
 
+# We need to serialize our outputs in a very particular order or we won't be
+# compatible with e3nn
+def sort_multiplicities(muls):
+  grouped_muls = []
+  for mul in muls:
+    if len(grouped_muls) == 0 or grouped_muls[-1][0][4] != mul[4] or grouped_muls[-1][0][5] != mul[5]:
+      grouped_muls.append([])
+    grouped_muls[-1].append(mul)
+  ret = []
+  for group in grouped_muls:
+    group.sort(key=lambda x: (x[0] + 1) * 16 + x[1])
+    ret += group
+  return ret
+
 class CudaTensorProduct(torch.nn.Module):
   def __init__(self, irreps_in1, irreps_in2, irreps_out=None):
     assert(irreps_in1.dim <= 4096)
@@ -11,78 +25,75 @@ class CudaTensorProduct(torch.nn.Module):
     assert(irreps_in1.lmax <= 15)
     assert(irreps_in2.lmax <= 15)
     super().__init__()
-    self.cuda_tp = load(name='cuda_tp', sources=['cuda_tp.cpp', 'cuda_tp.cu'])
-    cb_matrix_layout = {}
-    self.cb_height = 0
-    idx_in1 = 0
-    for l1 in irreps_in1.ls:
-      idx_in2 = 0
-      for l2 in irreps_in2.ls:
-        for l3 in range(abs(l1-l2), l1+l2+1):
-          if irreps_out is not None and l3 not in irreps_out.ls:
-            continue
-          if l3 not in cb_matrix_layout:
-            cb_matrix_layout[l3] = []
-          cb_matrix_layout[l3].append((l1, l2, idx_in1, idx_in2, l3))
-          self.cb_height += 2 * l3 + 1
-        idx_in2 += 2 * l2 + 1
-      idx_in1 += 2 * l1 + 1
 
-    self.flops = 0
+    self.cuda_tp = load(name='cuda_tp', sources=['cuda_tp.cpp', 'cuda_tp.cu'])
+
     if irreps_out is not None:
+      weight_e3nn_indices_dict = {}
+      self.e3nn_idx = 0
       self.out_dims = irreps_out.dim
       self.num_weights = 0
-      self.out_layout = {}
-      gather_offset = 0
-      for l in irreps_out.ls:
-        if l not in self.out_layout:
-          self.out_layout[l] = [0]
-        self.out_layout[l][0] += 1
-      for l in set(irreps_out.ls):
-        self.out_layout[l].append(len(cb_matrix_layout[l]))
-        self.num_weights += self.out_layout[l][0] * self.out_layout[l][1]
-        # 1 fused-multiply-add per weight in the dense matmul.
-        self.flops += (2 * l + 1) * self.out_layout[l][0] * self.out_layout[l][1]
+      self.out_matrix_layout = {}
+      for mul, (l, p) in irreps_out:
+        self.out_matrix_layout[(l, int((p + 1) / 2))] = [mul, 0]
 
-      # e3nn has an unusual weight layout, so we need to unpermute the weights if we want to
-      # maintain compatibility.
-      self.in_weight_gather_indices = [0] * self.num_weights
-      gather_offsets = {}
-      offset = 0
-      multiplicities = []
-      for l in set(irreps_out.ls):
-        gather_offsets[l] = offset
-        offset += self.out_layout[l][0] * self.out_layout[l][1]
-        multiplicities += cb_matrix_layout[l]
-      multiplicities.sort(key=lambda x: x[0] * \
-              (irreps_in2.lmax + 1) * \
-              (irreps_out.lmax + 1) + x[1] * \
-              (irreps_out.lmax + 1) + x[4])
-      idx = 0
-      for multiplicity in multiplicities:
-        l = multiplicity[4]
-        out_mul = self.out_layout[l][0]
-        in_mul = self.out_layout[l][1]
-        for i in range(0, out_mul):
-          self.in_weight_gather_indices[gather_offsets[l] + i * in_mul] = idx
-          idx += 1
-        gather_offsets[l] += 1
+    cb_matrix_layout = {}
+    self.cb_height = 0
+    irrep_offset1 = 0
+    for mul1, (l1, p1) in irreps_in1:
+      irrep_offset2 = 0
+      for mul2, (l2, p2) in irreps_in2:
+        for l3 in range(abs(l1-l2), l1+l2+1):
+          p3 = int((p1 * p2 + 1) / 2)
+          offset1 = irrep_offset1
+          for i in range(0, mul1):
+            offset2 = irrep_offset2
+            for j in range(0, mul2):
+              if irreps_out is not None and (l3, p3) not in self.out_matrix_layout:
+                continue
+              if (l3, p3) not in cb_matrix_layout:
+                cb_matrix_layout[(l3, p3)] = []
+              cb_matrix_layout[(l3, p3)].append((l1, l2, offset1, offset2, int((p1 + 1) / 2), int((p2 + 1) / 2)))
+              self.cb_height += 2 * l3 + 1
+
+              if irreps_out is not None:
+                self.out_matrix_layout[(l3, p3)][1] += 1
+                if (l3, p3) not in weight_e3nn_indices_dict:
+                  weight_e3nn_indices_dict[(l3, p3)] = []
+                weight_e3nn_indices_dict[(l3, p3)].append([])
+                for k in range(0, self.out_matrix_layout[(l3, p3)][0]):
+                  weight_e3nn_indices_dict[(l3, p3)][-1].append(self.e3nn_idx)
+                  self.e3nn_idx += 1
+                  self.num_weights += 1
+
+              offset2 += 2 * l2 + 1
+            offset1 += 2 * l1 + 1
+        irrep_offset2 += (2 * l2 + 1) * mul2
+      irrep_offset1 += (2 * l1 + 1) * mul1
+
+    if irreps_out is not None:
+      self.weight_e3nn_indices = []
+      ls = list(weight_e3nn_indices_dict.keys())
+      ls.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
+      for (l, p) in ls:
+        # The weights are serialized in some weird column major order...
+        self.weight_e3nn_indices += torch.t(torch.tensor(weight_e3nn_indices_dict[(l, p)])).flatten().tolist()
     else:
       self.num_weights = None
 
     l3s = list(cb_matrix_layout.keys())
-    l3s.sort()
     row_offset = 0
     in1_indices = []
     in2_indices = []
     out_indices = []
     cb_vals = []
+    l3s.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
     if irreps_out is None:
-      for l3 in l3s:
-        multiplicities = cb_matrix_layout[l3]
-        multiplicities.sort(key=lambda x: x[0] * (irreps_in2.lmax + 1) + x[1])
+      for (l3, p3) in l3s:
+        multiplicities = cb_matrix_layout[(l3, p3)]
+        #multiplicities = sort_multiplicities(multiplicities)
         for multiplicity in multiplicities:
-          l1, l2, in1_offset, in2_offset, _ = multiplicity
+          l1, l2, in1_offset, in2_offset, _, _ = multiplicity
           cb_coeffs = o3.wigner_3j(l1, l2, l3)
           for m3 in range(0, 2 * l3 + 1):
             for m2 in range(0, 2 * l2 + 1):
@@ -93,20 +104,18 @@ class CudaTensorProduct(torch.nn.Module):
                 in2_indices.append(m2 + in2_offset)
                 out_indices.append(m3 + row_offset)
                 cb_vals.append(float(cb_coeffs[m1, m2, m3] * math.sqrt(2 * l3 + 1)))
-                self.flops += 2 # 1 multiply and 1 fused-multiply-add.
           row_offset += 2 * l3 + 1
     else:
       # If we need to do linear mixing at the end, it's more efficient to break
       # the mixing up into dense matmul operations. In order to do this, we need
       # to output m values in planes rather than the normal interleaved form.
       row_offset = 0
-      for l3 in l3s:
-        multiplicities = cb_matrix_layout[l3]
-        multiplicities.sort(key=lambda x: x[0] * (irreps_in2.lmax + 1) + x[1])
+      for (l3, p3) in l3s:
+        multiplicities = cb_matrix_layout[(l3, p3)]
         for m3 in range(0, 2 * l3 + 1):
           multiplicity_idx = 0
           for multiplicity in multiplicities:
-            l1, l2, in1_offset, in2_offset, _ = multiplicity
+            l1, l2, in1_offset, in2_offset, _, _ = multiplicity
             cb_coeffs = o3.wigner_3j(l1, l2, l3)
             for m2 in range(0, 2 * l2 + 1):
               for m1 in range(0, 2 * l1 + 1):
@@ -116,7 +125,6 @@ class CudaTensorProduct(torch.nn.Module):
                 in2_indices.append(m2 + in2_offset)
                 out_indices.append(row_offset + m3 * len(multiplicities) + multiplicity_idx)
                 cb_vals.append(float(cb_coeffs[m1, m2, m3] * math.sqrt(2 * l3 + 1)))
-                self.flops += 2 # 1 multiply and 1 fused-multiply-add
             multiplicity_idx += 1
         row_offset += len(multiplicities) * (2 * l3 + 1)
 
@@ -186,7 +194,11 @@ class CudaTensorProduct(torch.nn.Module):
     self.samples_per_block = 8
 
 
-  def forward(self, in1, in2, weights=None, permute_weights=True):
+  def convert_weights(self, weights):
+    return weights[self.weight_e3nn_indices]
+
+
+  def forward(self, in1, in2, weights=None):
     assert((weights is None and self.num_weights is None) or (weights is not None and self.num_weights is not None))
     batch_size = in1.shape[0]
     padded_batch_size = self.samples_per_block * int((batch_size + self.samples_per_block - 1) / self.samples_per_block)
@@ -206,19 +218,17 @@ class CudaTensorProduct(torch.nn.Module):
       return intermediate
     else:
       intermediate = torch.t(intermediate)
-      if permute_weights:
-        weights = weights[self.in_weight_gather_indices]
       out = torch.zeros((batch_size, self.out_dims))
-      ls = list(self.out_layout.keys())
-      ls.sort()
+      ls = list(self.out_matrix_layout.keys())
+      ls.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
       intermediate_idx = 0
       out_idx = 0
       weights_idx = 0
       gather_offset = 0
       gather_indices = []
-      for l in ls:
-        intermediate_muls = self.out_layout[l][1]
-        out_muls = self.out_layout[l][0]
+      for (l, p) in ls:
+        intermediate_muls = self.out_matrix_layout[(l, p)][1]
+        out_muls = self.out_matrix_layout[(l, p)][0]
         weights_len = intermediate_muls * out_muls
         curr_weights = weights[weights_idx:weights_idx + weights_len].reshape((out_muls, intermediate_muls))
         curr_weights *= math.sqrt(1 / intermediate_muls)
