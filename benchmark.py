@@ -84,20 +84,20 @@ def fc_tp_benchmark():
     test_tp = CudaTensorProduct(irreps_in1, irreps_in2, irreps_out)
     print('test compile time: {:.2E}s'.format(time.time() - start))
     start = time.time()
-#    cueq_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.SO3, config[1].replace('e', '')),
-#                                               cueq.Irreps(cueq.SO3, config[2].replace('e', '')),
-#                                               cueq.Irreps(cueq.SO3, config[3].replace('e', '')), 
-#                                               device='cuda', internal_weights=False, shared_weights=True)
+    cueq_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.O3, config[1]),
+                                               cueq.Irreps(cueq.O3, config[2]),
+                                               cueq.Irreps(cueq.O3, config[3]), 
+                                               device='cuda', internal_weights=False, shared_weights=True)
     print('cueq compile time: {:.2E}s'.format(time.time() - start))
     start = time.time()
-#    oeq_tp = FCTPP(irreps_in1, irreps_in2, irreps_out)
-#    oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
+    oeq_tp = FCTPP(irreps_in1, irreps_in2, irreps_out)
+    oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
     print('oeq compile time: {:.2E}s'.format(time.time() - start))
-#    cueq_ir_mul_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.O3, config[1].replace('e', '')),
-#                                               cueq.Irreps(cueq.O3, config[2].replace('e', '')),
-#                                               cueq.Irreps(cueq.O3, config[3].replace('e', '')),
-#                                               layout=cueq.ir_mul, device='cuda',
-#                                               internal_weights=False, shared_weights=True)
+    cueq_ir_mul_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.O3, config[1]),
+                                               cueq.Irreps(cueq.O3, config[2]),
+                                               cueq.Irreps(cueq.O3, config[3]),
+                                               layout=cueq.ir_mul, device='cuda',
+                                               internal_weights=False, shared_weights=True)
 
     in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
     in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
@@ -111,17 +111,17 @@ def fc_tp_benchmark():
       e3nn_tp(in1, in2)
     time_test(e3nn_cb, 'e3nn')
 
-#    def oeq_cb():
-#      oeq_tp(in1, in2, weights)
-#    time_test(oeq_cb, 'oeq')
+    def oeq_cb():
+      oeq_tp(in1, in2, weights)
+    time_test(oeq_cb, 'oeq')
 
-#    def cueq_cb():
-#      cueq_tp(in1, in2, weights)
-#    time_test(cueq_cb, 'cueq')
+    def cueq_cb():
+      cueq_tp(in1, in2, weights)
+    time_test(cueq_cb, 'cueq')
 
-#    def cueq_ir_mul_cb():
-#      cueq_ir_mul_tp(in1, in2, weights)
-#    time_test(cueq_ir_mul_cb, 'cueq (ir_mul layout)')
+    def cueq_ir_mul_cb():
+      cueq_ir_mul_tp(in1, in2, weights)
+    time_test(cueq_ir_mul_cb, 'cueq (ir_mul layout)')
 
     def test_prepermute_cb():
       test_tp(in1, in2, weights_perm)
