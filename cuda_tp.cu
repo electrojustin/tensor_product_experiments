@@ -7,6 +7,7 @@
 #define NUM_THREADS (1 << LOG_NUM_THREADS)
 #define NUM_BLOCKS 1024
 #define SAMPLES_PER_BLOCK 8
+//#define NUM_BLOCKS (50000 / SAMPLES_PER_BLOCK)
 #define MINIBATCH_MAX_SIZE (SAMPLES_PER_BLOCK * NUM_BLOCKS)
 
 #define BITFIELD_EXTRACT(SRC, DST, START, LEN) asm("bfe.u32 %0, %1, " #START ", " #LEN ";" : "=r"(DST) : "r"(SRC))
@@ -14,6 +15,7 @@
 
 __global__ void tensor_product_forward_kernel(
     float *__restrict__ in1_global, float *__restrict__ in2_global,
+    float *__restrict__ channel_weight,
     float *__restrict__ out, float *__restrict__ cb_palette_global,
     uint32_t *__restrict__ block_jobs, uint32_t *__restrict__ block_job_sizes,
     size_t in1_size, size_t in2_size, size_t cb_palette_size, size_t out_size,
@@ -120,6 +122,18 @@ __global__ void tensor_product_forward_kernel(
       acc2.w += in1[in1_idx + 7 * in1_size] * in2[in2_idx + 7 * in2_size] *
                 cb_palette[cb_idx];
     }
+
+    if (channel_weight != NULL) {
+       acc.x *= channel_weight[out_idx];
+       acc.y *= channel_weight[out_idx];
+       acc.z *= channel_weight[out_idx];
+       acc.w *= channel_weight[out_idx];
+       acc2.x *= channel_weight[out_idx];
+       acc2.y *= channel_weight[out_idx];
+       acc2.z *= channel_weight[out_idx];
+       acc2.w *= channel_weight[out_idx];
+    }
+
     out[out_idx] = acc.x;
     out[out_idx + out_size] = acc.y;
     out[out_idx + 2 * out_size] = acc.z;
@@ -133,7 +147,7 @@ __global__ void tensor_product_forward_kernel(
 }
 
 void tensor_product_forward_cuda(
-    float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ out,
+    float *__restrict__ in1, float *__restrict__ in2, float *__restrict__ channel_weight, float *__restrict__ out,
     float *__restrict__ cb_palette, uint32_t *__restrict__ block_jobs,
     uint32_t *__restrict__ block_job_sizes, size_t in1_size, size_t in2_size,
     size_t cb_palette_size, size_t out_size, int batch_size) {
@@ -142,7 +156,7 @@ void tensor_product_forward_cuda(
       tensor_product_forward_kernel<<<
           NUM_BLOCKS, NUM_THREADS,
           (SAMPLES_PER_BLOCK * (in1_size + in2_size) + cb_palette_size) *
-              sizeof(float)>>>(in1, in2, out, cb_palette, block_jobs,
+              sizeof(float)>>>(in1, in2, channel_weight, out, cb_palette, block_jobs,
                                block_job_sizes, in1_size, in2_size,
                                cb_palette_size, out_size, minibatch_size);
       batch_size -= MINIBATCH_MAX_SIZE;

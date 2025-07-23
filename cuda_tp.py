@@ -4,31 +4,19 @@ import math
 import random
 from torch.utils.cpp_extension import load
 
-# We need to serialize our outputs in a very particular order or we won't be
-# compatible with e3nn
-def sort_multiplicities(muls):
-  grouped_muls = []
-  for mul in muls:
-    if len(grouped_muls) == 0 or grouped_muls[-1][0][4] != mul[4] or grouped_muls[-1][0][5] != mul[5]:
-      grouped_muls.append([])
-    grouped_muls[-1].append(mul)
-  ret = []
-  for group in grouped_muls:
-    group.sort(key=lambda x: (x[0] + 1) * 16 + x[1])
-    ret += group
-  return ret
-
 class CudaTensorProduct(torch.nn.Module):
-  def __init__(self, irreps_in1, irreps_in2, irreps_out=None):
+  def __init__(self, irreps_in1, irreps_in2, irreps_out=None, connection_mode=None, flip_parity_order=False):
     assert(irreps_in1.dim <= 4096)
     assert(irreps_in2.dim <= 4096)
     assert(irreps_in1.lmax <= 15)
     assert(irreps_in2.lmax <= 15)
+    assert((connection_mode != 'full') or (irreps_out is not None))
     super().__init__()
 
     self.cuda_tp = load(name='cuda_tp', sources=['cuda_tp.cpp', 'cuda_tp.cu'])
 
-    if irreps_out is not None:
+    self.connection_mode = connection_mode
+    if connection_mode == 'full':
       weight_e3nn_indices_dict = {}
       self.e3nn_idx = 0
       self.out_dims = irreps_out.dim
@@ -36,6 +24,10 @@ class CudaTensorProduct(torch.nn.Module):
       self.out_matrix_layout = {}
       for mul, (l, p) in irreps_out:
         self.out_matrix_layout[(l, int((p + 1) / 2))] = [mul, 0]
+    elif connection_mode == 'channel':
+      self.num_weights = 0
+      self.weight_gather = []
+      weight_idx = 0
 
     cb_matrix_layout = {}
     self.cb_height = 0
@@ -56,7 +48,7 @@ class CudaTensorProduct(torch.nn.Module):
               cb_matrix_layout[(l3, p3)].append((l1, l2, offset1, offset2, int((p1 + 1) / 2), int((p2 + 1) / 2)))
               self.cb_height += 2 * l3 + 1
 
-              if irreps_out is not None:
+              if connection_mode == 'full':
                 self.out_matrix_layout[(l3, p3)][1] += 1
                 if (l3, p3) not in weight_e3nn_indices_dict:
                   weight_e3nn_indices_dict[(l3, p3)] = []
@@ -71,14 +63,14 @@ class CudaTensorProduct(torch.nn.Module):
         irrep_offset2 += (2 * l2 + 1) * mul2
       irrep_offset1 += (2 * l1 + 1) * mul1
 
-    if irreps_out is not None:
+    if connection_mode == 'full':
       self.weight_e3nn_indices = []
       ls = list(weight_e3nn_indices_dict.keys())
       ls.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
       for (l, p) in ls:
         # The weights are serialized in some weird column major order...
         self.weight_e3nn_indices += torch.t(torch.tensor(weight_e3nn_indices_dict[(l, p)])).flatten().tolist()
-    else:
+    elif connection_mode is None:
       self.num_weights = None
 
     l3s = list(cb_matrix_layout.keys())
@@ -87,11 +79,13 @@ class CudaTensorProduct(torch.nn.Module):
     in2_indices = []
     out_indices = []
     cb_vals = []
-    l3s.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
-    if irreps_out is None:
+    if flip_parity_order:
+      l3s.sort(key=lambda x: 2 * (x[0] + 1) + (1 - x[1]))
+    else:
+      l3s.sort(key=lambda x: 2 * (x[0] + 1) + x[1])
+    if connection_mode is None or connection_mode == 'channel':
       for (l3, p3) in l3s:
         multiplicities = cb_matrix_layout[(l3, p3)]
-        #multiplicities = sort_multiplicities(multiplicities)
         for multiplicity in multiplicities:
           l1, l2, in1_offset, in2_offset, _, _ = multiplicity
           cb_coeffs = o3.wigner_3j(l1, l2, l3)
@@ -104,7 +98,12 @@ class CudaTensorProduct(torch.nn.Module):
                 in2_indices.append(m2 + in2_offset)
                 out_indices.append(m3 + row_offset)
                 cb_vals.append(float(cb_coeffs[m1, m2, m3] * math.sqrt(2 * l3 + 1)))
+            if connection_mode == 'channel':
+              self.weight_gather.append(weight_idx)
           row_offset += 2 * l3 + 1
+          if connection_mode == 'channel':
+            weight_idx += 1
+            self.num_weights += 1
     else:
       # If we need to do linear mixing at the end, it's more efficient to break
       # the mixing up into dense matmul operations. In order to do this, we need
@@ -200,6 +199,12 @@ class CudaTensorProduct(torch.nn.Module):
 
   def forward(self, in1, in2, weights=None):
     assert((weights is None and self.num_weights is None) or (weights is not None and self.num_weights is not None))
+    if self.connection_mode == 'channel':
+      channel_weights = torch.zeros((len(self.weight_gather)))
+      channel_weights = weights[self.weight_gather]
+    else:
+      channel_weights = torch.zeros((0))
+
     batch_size = in1.shape[0]
     padded_batch_size = self.samples_per_block * int((batch_size + self.samples_per_block - 1) / self.samples_per_block)
     padded_in1 = torch.zeros((padded_batch_size, in1.shape[1]))
@@ -210,11 +215,12 @@ class CudaTensorProduct(torch.nn.Module):
     intermediate = self.cuda_tp.forward(
       padded_in1,
       padded_in2,
+      channel_weights,
       intermediate,
       self.cb_palette,
       self.block_jobs,
       self.block_job_sizes)[:batch_size, :]
-    if weights is None:
+    if self.connection_mode is None or self.connection_mode == 'channel':
       return intermediate
     else:
       intermediate = torch.t(intermediate)

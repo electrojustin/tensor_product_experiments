@@ -7,6 +7,7 @@ import cuequivariance as cueq
 import cuequivariance_torch as cueq_torch
 import openequivariance as oeq
 from openequivariance.benchmark.tpp_creation_utils import FullyConnectedTPProblem as FCTPP
+from openequivariance.benchmark.tpp_creation_utils import ChannelwiseTPP as CTPP
 import time
 
 torch.set_default_device('cuda')
@@ -27,7 +28,7 @@ configs = [
         ('nequip-revmd17-aspirin', '32x0o + 32x0e + 32x1o + 32x1e + 32x2o + 32x2e', '1x0e + 1x1o', '64x0o + 64x0e + 64x1o + 64x1e'),
         ('nequip-revmd17-toluene', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e', '1x0e + 1x1o + 1x2e', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e'),
         # nequip-revmd17-benzene triggers some sort of bug.
-#        ('nequip-revmd17-benzene', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e + 64x3o + 64x3e', '1x0e + 1x1o + 1x2e + 1x3o', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e + 64x3o + 64x3e'),
+        #('nequip-revmd17-benzene', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e + 64x3o + 64x3e', '1x0e + 1x1o + 1x2e + 1x3o', '64x0o + 64x0e + 64x1o + 64x1e + 64x2o + 64x2e + 64x3o + 64x3e'),
         ('nequip-water', '32x0o + 32x0e + 32x1o + 32x1e', '1x0e + 1x1o', '32x0o + 32x0e + 32x1o + 32x1e'),
 ]
 
@@ -81,7 +82,7 @@ def fc_tp_benchmark():
     e3nn_tp.compile()
     print('e3nn compile time: {:.2E}s'.format(time.time() - start))
     start = time.time()
-    test_tp = CudaTensorProduct(irreps_in1, irreps_in2, irreps_out)
+    test_tp = CudaTensorProduct(irreps_in1, irreps_in2, irreps_out, 'full')
     print('test compile time: {:.2E}s'.format(time.time() - start))
     start = time.time()
     cueq_tp = cueq_torch.FullyConnectedTensorProduct(cueq.Irreps(cueq.O3, config[1]),
@@ -128,6 +129,60 @@ def fc_tp_benchmark():
     time_test(test_prepermute_cb, 'test')
 
 
+def channel_tp_benchmark():
+  print('==== Channel Wise benchmarks ====')
+  for config in configs:
+    print(config[0])
+    irreps_in1 = o3.Irreps(config[1]).sort().irreps.simplify()
+    irreps_in2 = o3.Irreps(config[2]).sort().irreps.simplify()
+
+    start = time.time()
+    test_tp = CudaTensorProduct(irreps_in1, irreps_in2, irreps_out=None,
+                                connection_mode='channel')
+    print('test compile time: {:.2E}s'.format(time.time() - start))
+    cueq_tp = cueq_torch.ChannelWiseTensorProduct(cueq.Irreps(cueq.O3, config[1]),
+                                               cueq.Irreps(cueq.O3, config[2]),
+                                               device='cuda', shared_weights=True)
+    print('cueq compile time: {:.2E}s'.format(time.time() - start))
+    irreps_out = o3.Irreps(str(cueq_tp.irreps_out)).sort().irreps.simplify()
+    start = time.time()
+    oeq_tp = CTPP(irreps_in1, irreps_in2, irreps_out)
+    oeq_tp = oeq.TensorProduct(oeq_tp, torch_op=True)
+    print('oeq compile time: {:.2E}s'.format(time.time() - start))
+    cueq_ir_mul_tp = cueq_torch.ChannelWiseTensorProduct(cueq.Irreps(cueq.O3, config[1]),
+                                               cueq.Irreps(cueq.O3, config[2]),
+                                               layout=cueq.ir_mul,
+                                               device='cuda', shared_weights=True)
+
+    in1 = torch.randn((BATCH_SIZE, irreps_in1.dim))
+    in2 = torch.randn((BATCH_SIZE, irreps_in2.dim))
+    weights = cueq_tp.weight.flatten()
+    weights_test = weights
+    weights_oeq = weights.reshape((1, -1)).repeat(BATCH_SIZE, 1)
+
+    def test_cb():
+      test_tp(in1, in2, weights_test)
+    time_test(test_cb, 'test')
+
+    def cueq_cb():
+      cueq_tp(in1, in2)
+    time_test(cueq_cb, 'cueq')
+
+    def cueq_ir_mul_cb():
+      cueq_ir_mul_tp(in1, in2)
+    time_test(cueq_ir_mul_cb, 'cueq (ir_mul layout)')
+
+    def oeq_cb():
+      oeq_tp(in1, in2, weights_oeq)
+    time_test(oeq_cb, 'oeq')
+
+    def roofline():
+      torch.einsum('bi,bj->bij', in1, in2)
+    time_test(roofline, 'roofline')
+
+
 full_tp_benchmark()
 print()
 fc_tp_benchmark()
+print()
+channel_tp_benchmark()
